@@ -91,7 +91,7 @@ def list_employees(department: Optional[str] = None, page: int = 1, page_size: i
     if department:
         q["department"] = department
     skip = (page - 1) * page_size
-    total = db.employees.count_documents({})
+    total = db.employees.count_documents(q)
     items = list(db.employees.find(q, {"_id": 0}).skip(skip).limit(page_size))
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
