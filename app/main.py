@@ -101,6 +101,8 @@ def punch_in(body: PunchInIn):
     emp = db.employees.find_one({"emp_code": body.emp_code})
     if not emp:
         raise HTTPException(404, "employee not found")
+    if body.status not in ["PRESENT", "WFH", "ON_DUTY"]:
+        raise HTTPException(422, "status must be PRESENT, WFH or ON_DUTY")
     ts = datetime.fromtimestamp(body.punched_at / 1000) if body.punched_at else datetime.now()
     d = ts.date().isoformat()
     if db.attendance_logs.find_one({"emp_code": body.emp_code, "date": d}):
