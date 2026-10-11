@@ -104,6 +104,7 @@ def punch_in(body: PunchInIn):
     if body.status not in ["PRESENT", "WFH", "ON_DUTY"]:
         raise HTTPException(422, "status must be PRESENT, WFH or ON_DUTY")
     ts = datetime.fromtimestamp(body.punched_at / 1000, IST) if body.punched_at else datetime.now(IST)
+    ts = ts.replace(microsecond=0)
     d = ts.date().isoformat()
     if db.attendance_logs.find_one({"emp_code": body.emp_code, "date": d}):
         raise HTTPException(409, "already punched in for this date")
