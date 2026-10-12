@@ -13,5 +13,7 @@ List every defect you found in the starter `app/main.py` (helpers and endpoints)
 | 7 | `compute_late_minutes` | It cuts the seconds before checking "more than 10" | 09:40:01 gave 0, the rule wants 10 | I compare `seconds > 600` |
 | 8 | `compute_work_hours`, the `round` | Python `round` is not half-up | 3618 seconds gave 1.0, the rule wants 1.01 | I used `Decimal` with `ROUND_HALF_UP` |
 | 9 | `compute_overtime`, the last line | No 30 minutes minimum | 18:59:59 gave 29, the rule wants 0 | I return the minutes only if they are 30 or more |
+| 10 | `punch_in`, the line `return doc` | It returns the time as text, but the contract wants epoch milliseconds | `punch_in` was `"2026-10-12T13:35:17+05:30"` | I changed it to `return to_api(doc)` |
+
 
 Also note anything you looked at and decided was **not** a defect, and why.

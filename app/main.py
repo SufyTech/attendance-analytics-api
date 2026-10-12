@@ -144,8 +144,7 @@ def punch_in(body: PunchInIn):
     res = db.attendance_logs.insert_one(doc)
     doc["id"] = str(res.inserted_id)
     doc.pop("_id", None)
-    return doc
-
+    return to_api(doc)
 
 @app.get("/attendance")
 def list_attendance(
