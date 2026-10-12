@@ -43,6 +43,20 @@ def compute_work_hours(punch_in: datetime, punch_out: datetime) -> float:
        hours = Decimal(seconds) / Decimal(3600)
        return float(hours.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
+def to_ms(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (dt - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(milliseconds=1)
+
+
+def to_api(rec):
+    out = {k: v for k, v in rec.items() if k != "_id"}
+    out["punch_in"] = to_ms(rec.get("punch_in"))
+    out["punch_out"] = to_ms(rec.get("punch_out"))
+    return out
+
 
 def compute_overtime(punch_out: datetime, shift_end: str, date_str: str) -> int:
     h, m = map(int, shift_end.split(":"))
@@ -69,6 +83,9 @@ class PunchInIn(BaseModel):
     punched_at: Optional[int] = None
     status: str = "PRESENT"
 
+class PunchOutIn(BaseModel):
+    emp_code: str
+    punched_at: Optional[int] = None
 
 # --------------------------------------------------------------------------- #
 # Endpoints provided
@@ -158,7 +175,39 @@ def list_attendance(
         d["id"] = str(d.pop("_id"))
     return {"items": page_docs, "total": total, "page": page, "page_size": page_size}
 
-
+@app.post("/attendance/punch-out")
+def punch_out(body: PunchOutIn):
+    emp = db.employees.find_one({"emp_code": body.emp_code})
+    if not emp:
+        raise HTTPException(404, "employee not found")
+    ts = datetime.fromtimestamp(body.punched_at / 1000, IST) if body.punched_at else datetime.now(IST)
+    ts = ts.replace(microsecond=0)
+    rec = db.attendance_logs.find_one(
+        {"emp_code": body.emp_code, "punch_in": {"$lte": ts}},
+        sort=[("punch_in", -1)],
+    )
+    if not rec:
+        raise HTTPException(404, "no punch-in found")
+    if rec.get("punch_out") is not None:
+        raise HTTPException(409, "already punched out")
+    pin = rec["punch_in"].replace(tzinfo=timezone.utc)
+    if ts <= pin or ts - pin > timedelta(hours=24):
+        raise HTTPException(422, "punched_at must be after punch_in and within 24 hours")
+    work_hours = compute_work_hours(pin, ts)
+    overtime = compute_overtime(ts, emp["shift_end"], rec["date"])
+    res = db.attendance_logs.update_one(
+        {"_id": rec["_id"], "punch_out": None},
+        {"$set": {
+            "punch_out": ts,
+            "work_hours": work_hours,
+            "overtime_minutes": overtime,
+            "half_day": work_hours < 4.5,
+        }},
+    )
+    if res.modified_count == 0:
+        raise HTTPException(409, "already punched out")
+    rec = db.attendance_logs.find_one({"_id": rec["_id"]})
+    return to_api(rec)
 # --------------------------------------------------------------------------- #
 # TODO - the rest of the contract (see openapi.yaml):
 #   POST  /attendance/punch-out
