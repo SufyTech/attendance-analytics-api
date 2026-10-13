@@ -9,6 +9,8 @@ works, but nobody has reviewed it. Read PROBLEM_STATEMENT.docx for what is expec
 openapi.yaml for the contract and DATA_MODEL.md for what is stored in MongoDB.
 """
 import os
+import calendar
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -95,6 +97,15 @@ def compute_overtime(punch_out: datetime, shift_end: str, date_str: str) -> int:
     minutes = int((punch_out - end).total_seconds() // 60)
     return minutes if minutes >= 30 else 0
 
+def count_weekdays(start: str, end: str) -> int:
+    d = datetime.fromisoformat(start)
+    last = datetime.fromisoformat(end)
+    count = 0
+    while d <= last:
+        if d.weekday() < 5:  # Monday to Friday
+            count += 1
+        d += timedelta(days=1)
+    return count
 
 # --------------------------------------------------------------------------- #
 # Models
@@ -319,6 +330,57 @@ def regularize(emp_code: str, date: str, body: RegularizeIn):
     if res.modified_count == 0:
         raise HTTPException(409, "the record was changed by someone else, try again")
     return to_api(db.attendance_logs.find_one({"_id": rec["_id"]}))
+
+@app.get("/analytics/employees/{emp_code}/monthly")
+def employee_monthly(emp_code: str, month: str):
+    if not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+        raise HTTPException(422, "month must be YYYY-MM")
+    emp = db.employees.find_one({"emp_code": emp_code})
+    if not emp:
+        raise HTTPException(404, "employee not found")
+    year, mon = int(month[:4]), int(month[5:])
+    last_day = calendar.monthrange(year, mon)[1]
+    first = f"{month}-01"
+    last = f"{month}-{last_day:02d}"
+    start = max(first, emp["joined_on"])
+    working_days = count_weekdays(start, last)
+    pipeline = [
+        {"$match": {"emp_code": emp_code, "date": {"$gte": first, "$lte": last}}},
+        {"$group": {
+            "_id": None,
+            "leave_days": {"$sum": {"$cond": [{"$eq": ["$status", "LEAVE"]}, 1, 0]}},
+            "present_days": {"$sum": {"$cond": [
+                {"$and": [
+                    {"$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]},
+                    {"$in": [{"$dayOfWeek": {"$dateFromString": {"dateString": "$date"}}}, [2, 3, 4, 5, 6]]},
+                ]},
+                {"$cond": [{"$eq": [{"$ifNull": ["$half_day", False]}, True]}, 0.5, 1]},
+                0,
+            ]}},
+            "late_count": {"$sum": {"$cond": [{"$gt": ["$late_minutes", 0]}, 1, 0]}},
+            "total_late_minutes": {"$sum": "$late_minutes"},
+            "total_overtime_minutes": {"$sum": "$overtime_minutes"},
+        }},
+    ]
+    result = list(db.attendance_logs.aggregate(pipeline))
+    s = result[0] if result else {}
+    
+    present = Decimal(str(s.get("present_days", 0)))
+    if working_days == 0:
+        attendance_pct = None
+    else:
+        attendance_pct = float((present * 100 / Decimal(str(working_days))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    return {
+        "emp_code": emp_code,
+        "month": month,
+        "working_days": working_days,
+        "present_days": s.get("present_days", 0),
+        "leave_days": s.get("leave_days", 0),
+        "late_count": s.get("late_count", 0),
+        "total_late_minutes": s.get("total_late_minutes", 0),
+        "total_overtime_minutes": s.get("total_overtime_minutes", 0),
+        "attendance_percentage": attendance_pct
+    }
     # --------------------------------------------------------------------------- #
     # TODO - the rest of the contract (see openapi.yaml):
     #   POST  /attendance/punch-out
