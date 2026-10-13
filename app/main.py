@@ -14,8 +14,8 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from pymongo import MongoClient, cursor
+from pydantic import BaseModel, Field
+from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -25,6 +25,7 @@ client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
 db = client[os.getenv("MONGO_DB", "attendance_db")]
 
 IST = timezone(timedelta(hours=5, minutes=30))
+ALL_STATUSES = ["PRESENT", "WFH", "ON_DUTY", "ABSENT", "LEAVE"]
 
 app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
 
@@ -77,6 +78,16 @@ def to_api(rec):
     out["history"] = [history_to_api(h) for h in rec.get("history", [])]
     return out
 
+def from_ms(ms):
+    if ms < 100000000000 or ms > 4102444800000:
+        raise HTTPException(422, "time must be epoch milliseconds")
+    return datetime.fromtimestamp(ms / 1000, IST).replace(microsecond=0)
+
+
+def to_aware(dt):
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc).astimezone(IST)
 
 def compute_overtime(punch_out: datetime, shift_end: str, date_str: str) -> int:
     h, m = map(int, shift_end.split(":"))
@@ -106,6 +117,14 @@ class PunchInIn(BaseModel):
 class PunchOutIn(BaseModel):
     emp_code: str
     punched_at: Optional[int] = None
+    
+    
+class RegularizeIn(BaseModel):
+    status: Optional[str] = None
+    punch_in: Optional[int] = None
+    punch_out: Optional[int] = None
+    reason: str = Field(min_length=5, max_length=200)
+    regularized_by: str = Field(min_length=1, max_length=50)
 
 # --------------------------------------------------------------------------- #
 # Endpoints provided
@@ -230,13 +249,83 @@ def punch_out(body: PunchOutIn):
         raise HTTPException(409, "already punched out")
     rec = db.attendance_logs.find_one({"_id": rec["_id"]})
     return to_api(rec)
-# --------------------------------------------------------------------------- #
-# TODO - the rest of the contract (see openapi.yaml):
-#   POST  /attendance/punch-out
-#   PATCH /attendance/{emp_code}/{date}
-#   GET   /analytics/employees/{emp_code}/monthly
-#   GET   /analytics/departments/summary
-#   GET   /analytics/leaderboard/late
-#   GET   /analytics/departments/{department}/trend
-#   GET   /admin/explain/{endpoint}
-# --------------------------------------------------------------------------- #
+
+@app.patch("/attendance/{emp_code}/{date}")
+def regularize(emp_code: str, date: str, body: RegularizeIn):
+    emp = db.employees.find_one({"emp_code": emp_code})
+    if not emp:
+        raise HTTPException(404, "employee not found")
+    rec = db.attendance_logs.find_one({"emp_code": emp_code, "date": date})
+    if not rec:
+        raise HTTPException(404, "no record for that date")
+    new_status = body.status or rec["status"]
+    if new_status not in ALL_STATUSES:
+        raise HTTPException(422, "invalid status")
+    if new_status in ["ABSENT", "LEAVE"]:
+        if body.punch_in is not None or body.punch_out is not None:
+            raise HTTPException(422, "this status cannot have punch times")
+        new_in = None
+        new_out = None
+    else:
+        new_in = from_ms(body.punch_in) if body.punch_in is not None else to_aware(rec.get("punch_in"))
+        new_out = from_ms(body.punch_out) if body.punch_out is not None else to_aware(rec.get("punch_out"))
+        if new_in is None:
+            raise HTTPException(422, "a presence status needs a punch_in")
+        if body.punch_in is not None and new_in.date().isoformat() != date:
+            raise HTTPException(422, "punch_in must stay on the record's date")
+        if new_out is not None and (new_out <= new_in or new_out - new_in > timedelta(hours=24)):
+            raise HTTPException(422, "punch_out must be after punch_in and within 24 hours")
+    new_late = 0
+    new_hours = None
+    new_overtime = 0
+    new_half = False
+    if new_in is not None:
+        new_late = compute_late_minutes(new_in, emp["shift_start"])
+        if new_out is not None:
+            new_hours = compute_work_hours(new_in, new_out)
+            new_overtime = compute_overtime(new_out, emp["shift_end"], date)
+            new_half = new_hours < 4.5
+    new_values = {
+        "status": new_status,
+        "punch_in": new_in,
+        "punch_out": new_out,
+        "work_hours": new_hours,
+        "late_minutes": new_late,
+        "overtime_minutes": new_overtime,
+        "half_day": new_half,
+    }
+    changes = {}
+    for field, new_value in new_values.items():
+        old_value = rec.get(field)
+        if field in ("punch_in", "punch_out"):
+            old_value = to_aware(old_value)
+        if field == "half_day":
+            old_value = bool(old_value)
+        if old_value != new_value:
+            changes[field] = {"from": rec.get(field), "to": new_value}
+    if not changes:
+        raise HTTPException(422, "nothing to change")
+    entry = {
+        "at": datetime.now(IST).replace(microsecond=0),
+        "by": body.regularized_by,
+        "reason": body.reason,
+        "changes": changes,
+    }
+    n = len(rec.get("history", []))
+    res = db.attendance_logs.update_one(
+        {"_id": rec["_id"], f"history.{n}": {"$exists": False}},
+        {"$set": new_values, "$push": {"history": entry}},
+    )
+    if res.modified_count == 0:
+        raise HTTPException(409, "the record was changed by someone else, try again")
+    return to_api(db.attendance_logs.find_one({"_id": rec["_id"]}))
+    # --------------------------------------------------------------------------- #
+    # TODO - the rest of the contract (see openapi.yaml):
+    #   POST  /attendance/punch-out
+    #   PATCH /attendance/{emp_code}/{date}
+    #   GET   /analytics/employees/{emp_code}/monthly
+    #   GET   /analytics/departments/summary
+    #   GET   /analytics/leaderboard/late
+    #   GET   /analytics/departments/{department}/trend
+    #   GET   /admin/explain/{endpoint}
+    # --------------------------------------------------------------------------- #
