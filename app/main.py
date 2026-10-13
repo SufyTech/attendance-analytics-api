@@ -15,7 +15,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from pymongo import MongoClient
+from pymongo import MongoClient, cursor
 from decimal import Decimal, ROUND_HALF_UP
 
 load_dotenv()
@@ -51,10 +51,25 @@ def to_ms(dt):
     return (dt - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(milliseconds=1)
 
 
+def history_to_api(entry):
+    out = dict(entry)
+    out["at"] = to_ms(entry.get("at"))
+    changes = {}
+    for field, change in entry.get("changes", {}).items():
+        if field in ("punch_in", "punch_out"):
+            changes[field] = {"from": to_ms(change.get("from")), "to": to_ms(change.get("to"))}
+        else:
+            changes[field] = change
+    out["changes"] = changes
+    return out
+
+
 def to_api(rec):
     out = {k: v for k, v in rec.items() if k != "_id"}
     out["punch_in"] = to_ms(rec.get("punch_in"))
     out["punch_out"] = to_ms(rec.get("punch_out"))
+    out["half_day"] = rec.get("half_day", False)
+    out["history"] = [history_to_api(h) for h in rec.get("history", [])]
     return out
 
 
@@ -166,13 +181,11 @@ def list_attendance(
             q["date"]["$lte"] = date_to
     if status:
         q["status"] = status
-    docs = list(db.attendance_logs.find(q))
-    docs.sort(key=lambda d: d["date"], reverse=True)
-    total = len(docs)
-    page_docs = docs[(page - 1) * page_size : page * page_size]
-    for d in page_docs:
-        d["id"] = str(d.pop("_id"))
-    return {"items": page_docs, "total": total, "page": page, "page_size": page_size}
+    skip = (page - 1) * page_size
+    total = db.attendance_logs.count_documents(q)
+    cursor = db.attendance_logs.find(q, {"_id": 0}).sort([("date", -1), ("emp_code", 1)]).skip(skip).limit(page_size)
+    items = [to_api(d) for d in cursor]
+    return {"items": items, "total": total, "page": page,"page_size": page_size}
 
 @app.post("/attendance/punch-out")
 def punch_out(body: PunchOutIn):

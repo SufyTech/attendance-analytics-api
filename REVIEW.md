@@ -14,6 +14,8 @@ List every defect you found in the starter `app/main.py` (helpers and endpoints)
 | 8 | `compute_work_hours`, the `round` | Python `round` is not half-up | 3618 seconds gave 1.0, the rule wants 1.01 | I used `Decimal` with `ROUND_HALF_UP` |
 | 9 | `compute_overtime`, the last line | No 30 minutes minimum | 18:59:59 gave 29, the rule wants 0 | I return the minutes only if they are 30 or more |
 | 10 | `punch_in`, the line `return doc` | It returns the time as text, but the contract wants epoch milliseconds | `punch_in` was `"2026-10-12T13:35:17+05:30"` | I changed it to `return to_api(doc)` |
+| 11 | `list_attendance`, the end of the function | It loaded all records into Python, sorted there, and returned database dates. The contract wants MongoDB to sort and page, and epoch milliseconds | The dates came out in the order they were saved, not newest first | I used `count_documents(q)`, then `.sort`, `.skip`, `.limit`, and `to_api` |
+| 12 | `to_api` | It didn't convert the dates inside `history`, and didn't add `half_day` and `history` when missing | `history` showed text dates, and the `EMP0002` record had no `history` | I added `history_to_api` and defaults |
 
 
 Also note anything you looked at and decided was **not** a defect, and why.
