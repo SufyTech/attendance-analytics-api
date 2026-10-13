@@ -379,8 +379,60 @@ def employee_monthly(emp_code: str, month: str):
         "late_count": s.get("late_count", 0),
         "total_late_minutes": s.get("total_late_minutes", 0),
         "total_overtime_minutes": s.get("total_overtime_minutes", 0),
-        "attendance_percentage": attendance_pct
+        "attendance_pct": attendance_pct,
     }
+    
+@app.get("/analytics/departments/summary")
+def department_summary(month: str, department: Optional[str] = None):
+    if not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+        raise HTTPException(422, "month must be YYYY-MM")
+    year, mon = int(month[:4]), int(month[5:])
+    last = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+    emp_match = {"joined_on": {"$lte": last}}
+    if department:
+        emp_match["department"] = department
+    first = f"{month}-01"
+    pipeline = [
+        {"$match": emp_match},
+        {"$lookup": {
+            "from": "attendance_logs",
+            "localField": "emp_code",
+            "foreignField": "emp_code",
+            "pipeline": [{"$match": {"date": {"$gte": first, "$lte": last}}}],
+            "as": "logs",
+        }},
+        {"$unwind": {"path": "$logs", "preserveNullAndEmptyArrays": True}},
+        {"$group": {
+            "_id": "$department",
+            "emps": {"$addToSet": "$emp_code"},
+            "present_days": {"$sum": {"$cond": [
+                {"$and": [
+                    {"$in": ["$logs.status", ["PRESENT", "WFH", "ON_DUTY"]]},
+                    {"$in": [{"$dayOfWeek": {"$dateFromString": {"dateString": "$logs.date"}}}, [2, 3, 4, 5, 6]]},
+                ]},
+                {"$cond": [{"$eq": [{"$ifNull": ["$logs.half_day", False]}, True]}, 0.5, 1]},
+                0,
+            ]}},
+            "late_count": {"$sum": {"$cond": [{"$gt": ["$logs.late_minutes", 0]}, 1, 0]}},
+            "total_late_minutes": {"$sum": "$logs.late_minutes"},
+            "leave_count": {"$sum": {"$cond": [{"$eq": ["$logs.status", "LEAVE"]}, 1, 0]}},
+            "on_duty_count": {"$sum": {"$cond": [{"$eq": ["$logs.status", "ON_DUTY"]}, 1, 0]}},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+    rows = list(db.employees.aggregate(pipeline))
+    items = []
+    for r in rows:
+        items.append({
+            "department": r["_id"],
+            "headcount": len(r["emps"]),
+            "present_days": r["present_days"],
+            "late_count": r["late_count"],
+            "total_late_minutes": r["total_late_minutes"],
+            "leave_count": r["leave_count"],
+            "on_duty_count": r["on_duty_count"],
+        })
+    return {"month": month, "items": items}
     # --------------------------------------------------------------------------- #
     # TODO - the rest of the contract (see openapi.yaml):
     #   POST  /attendance/punch-out
