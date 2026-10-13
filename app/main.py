@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from pymongo import MongoClient, cursor
+from pymongo.errors import DuplicateKeyError
 from decimal import Decimal, ROUND_HALF_UP
 
 load_dotenv()
@@ -27,6 +28,10 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
 
+db.employees.create_index("emp_code", unique=True)
+db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
+db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
+db.attendance_logs.create_index([("emp_code", 1), ("punch_in", -1)])
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -156,7 +161,12 @@ def punch_in(body: PunchInIn):
         "half_day": False,
         "history": [],
     }
-    res = db.attendance_logs.insert_one(doc)
+    try:
+        res = db.attendance_logs.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(409, "already punched in for this date")
+
+
     doc["id"] = str(res.inserted_id)
     doc.pop("_id", None)
     return to_api(doc)
