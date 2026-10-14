@@ -340,20 +340,8 @@ def regularize(emp_code: str, date: str, body: RegularizeIn):
         raise HTTPException(409, "the record was changed by someone else, try again")
     return to_api(db.attendance_logs.find_one({"_id": rec["_id"]}))
 
-@app.get("/analytics/employees/{emp_code}/monthly")
-def employee_monthly(emp_code: str, month: str):
-    if not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
-        raise HTTPException(422, "month must be YYYY-MM")
-    emp = db.employees.find_one({"emp_code": emp_code})
-    if not emp:
-        raise HTTPException(404, "employee not found")
-    year, mon = int(month[:4]), int(month[5:])
-    last_day = calendar.monthrange(year, mon)[1]
-    first = f"{month}-01"
-    last = f"{month}-{last_day:02d}"
-    start = max(first, emp["joined_on"])
-    working_days = count_weekdays(start, last)
-    pipeline = [
+def build_monthly_pipeline(emp_code, first, last):
+    return [
         {"$match": {"emp_code": emp_code, "date": {"$gte": first, "$lte": last}}},
         {"$group": {
             "_id": None,
@@ -371,6 +359,21 @@ def employee_monthly(emp_code: str, month: str):
             "total_overtime_minutes": {"$sum": "$overtime_minutes"},
         }},
     ]
+
+@app.get("/analytics/employees/{emp_code}/monthly")
+def employee_monthly(emp_code: str, month: str):
+    if not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+        raise HTTPException(422, "month must be YYYY-MM")
+    emp = db.employees.find_one({"emp_code": emp_code})
+    if not emp:
+        raise HTTPException(404, "employee not found")
+    year, mon = int(month[:4]), int(month[5:])
+    last_day = calendar.monthrange(year, mon)[1]
+    first = f"{month}-01"
+    last = f"{month}-{last_day:02d}"
+    start = max(first, emp["joined_on"])
+    working_days = count_weekdays(start, last)
+    pipeline = build_monthly_pipeline(emp_code, first, last)
     result = list(db.attendance_logs.aggregate(pipeline))
     s = result[0] if result else {}
     
@@ -391,17 +394,11 @@ def employee_monthly(emp_code: str, month: str):
         "attendance_pct": attendance_pct,
     }
     
-@app.get("/analytics/departments/summary")
-def department_summary(month: str, department: Optional[str] = None):
-    if not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
-        raise HTTPException(422, "month must be YYYY-MM")
-    year, mon = int(month[:4]), int(month[5:])
-    last = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+def build_summary_pipeline(first, last, department):
     emp_match = {"joined_on": {"$lte": last}}
     if department:
         emp_match["department"] = department
-    first = f"{month}-01"
-    pipeline = [
+    return [
         {"$match": emp_match},
         {"$lookup": {
             "from": "attendance_logs",
@@ -411,7 +408,7 @@ def department_summary(month: str, department: Optional[str] = None):
             "as": "logs",
         }},
         {"$unwind": {"path": "$logs", "preserveNullAndEmptyArrays": True}},
-                {"$addFields": {"has_hours": {"$and": [
+        {"$addFields": {"has_hours": {"$and": [
             {"$in": ["$logs.status", ["PRESENT", "WFH", "ON_DUTY"]]},
             {"$ne": [{"$ifNull": ["$logs.work_hours", None]}, None]},
         ]}}},
@@ -435,6 +432,16 @@ def department_summary(month: str, department: Optional[str] = None):
         }},
         {"$sort": {"_id": 1}},
     ]
+
+
+@app.get("/analytics/departments/summary")
+def department_summary(month: str, department: Optional[str] = None):
+    if not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+        raise HTTPException(422, "month must be YYYY-MM")
+    year, mon = int(month[:4]), int(month[5:])
+    first = f"{month}-01"
+    last = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+    pipeline = build_summary_pipeline(first, last, department)
     rows = list(db.employees.aggregate(pipeline))
     items = []
     for r in rows:
@@ -486,6 +493,43 @@ def explain_endpoint(
             "collection": "attendance_logs",
             "explain": json.loads(json_util.dumps(result)),
         }
+    
+    if endpoint == "employee_monthly":
+        if not emp_code or not month or not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+            raise HTTPException(422, "emp_code and month (YYYY-MM) are required")
+        year, mon = int(month[:4]), int(month[5:])
+        first = f"{month}-01"
+        last = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+        pipeline = build_monthly_pipeline(emp_code, first, last)
+        command = {
+            "explain": {"aggregate": "attendance_logs", "pipeline": pipeline, "cursor": {}},
+            "verbosity": "executionStats",
+        }
+        result = db.command(command)
+        return {
+            "endpoint": endpoint,
+            "collection": "attendance_logs",
+            "explain": json.loads(json_util.dumps(result)),
+        }
+    
+    if endpoint == "department_summary":
+        if not month or not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+         raise HTTPException(422, "month must be YYYY-MM")
+        year, mon = int(month[:4]), int(month[5:])
+        first = f"{month}-01"
+        last = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+        pipeline = build_summary_pipeline(first, last, department)
+        command = {
+            "explain": {"aggregate": "employees", "pipeline": pipeline, "cursor": {}},
+            "verbosity": "executionStats",
+        }
+        result = db.command(command)
+        return {
+            "endpoint": endpoint,
+            "collection": "employees",
+            "explain": json.loads(json_util.dumps(result)),
+        }
+    
     if endpoint != "attendance_list":
         raise HTTPException(422, "this endpoint is not supported yet")
     q = build_attendance_query(emp_code, date_from, date_to, status)
