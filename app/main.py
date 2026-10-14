@@ -461,9 +461,31 @@ def explain_endpoint(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     status: Optional[str] = None,
+    month: Optional[str] = None,
+    limit: int = 10,
+    department: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
 ):
+    if endpoint == "late_leaderboard":
+        if not month or not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+            raise HTTPException(422, "month must be YYYY-MM")
+        if limit < 1 or limit > 50:
+          raise HTTPException(422, "limit must be between 1 and 50")
+        year, mon = int(month[:4]), int(month[5:])
+        first = f"{month}-01"
+        last = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+        pipeline = build_leaderboard_pipeline(first, last, department)
+        command = {
+            "explain": {"aggregate": "attendance_logs", "pipeline": pipeline, "cursor": {}},
+            "verbosity": "executionStats",
+        }
+        result = db.command(command)
+        return {
+            "endpoint": endpoint,
+            "collection": "attendance_logs",
+            "explain": json.loads(json_util.dumps(result)),
+        }
     if endpoint != "attendance_list":
         raise HTTPException(422, "this endpoint is not supported yet")
     q = build_attendance_query(emp_code, date_from, date_to, status)
@@ -483,16 +505,8 @@ def explain_endpoint(
         "collection": "attendance_logs",
         "explain": json.loads(json_util.dumps(result)),
     }
-    
-@app.get("/analytics/leaderboard/late")
-def late_leaderboard(month: str, limit: int = 10, department: Optional[str] = None):
-    if not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
-        raise HTTPException(422, "month must be YYYY-MM")
-    if limit < 1 or limit > 50:
-        raise HTTPException(422, "limit must be between 1 and 50")
-    year, mon = int(month[:4]), int(month[5:])
-    first = f"{month}-01"
-    last = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+
+def build_leaderboard_pipeline(first, last, department):
     pipeline = [
         {"$match": {"date": {"$gte": first, "$lte": last}}},
         {"$group": {
@@ -507,6 +521,18 @@ def late_leaderboard(month: str, limit: int = 10, department: Optional[str] = No
     if department:
         pipeline.append({"$match": {"emp.department": department}})
     pipeline.append({"$sort": {"total_late_minutes": -1, "_id": 1}})
+    return pipeline
+
+@app.get("/analytics/leaderboard/late")
+def late_leaderboard(month: str, limit: int = 10, department: Optional[str] = None):
+    if not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+        raise HTTPException(422, "month must be YYYY-MM")
+    if limit < 1 or limit > 50:
+        raise HTTPException(422, "limit must be between 1 and 50")
+    year, mon = int(month[:4]), int(month[5:])
+    first = f"{month}-01"
+    last = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+    pipeline = build_leaderboard_pipeline(first, last, department)
     rows = list(db.attendance_logs.aggregate(pipeline))
     items = []
     rank = 0
