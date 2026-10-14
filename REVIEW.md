@@ -19,3 +19,6 @@ List every defect you found in the starter `app/main.py` (helpers and endpoints)
 | 13 | `punch_in`, the check followed by `insert_one` | It checks first and then saves, so two requests at the same moment could both save | I noticed it from reading the code, because the contract says that of two simultaneous punch-ins exactly one gets 201 | I added a unique index on `emp_code` and `date`, and I catch `DuplicateKeyError` and answer 409 |
 
 Also note anything you looked at and decided was **not** a defect, and why.
+
+- `list_attendance` already used `(page - 1) * page_size`, so it was not a bug there (unlike `list_employees`).
+- The 409 on a second punch-in for the same day is correct. The contract wants it.

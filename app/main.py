@@ -402,6 +402,10 @@ def department_summary(month: str, department: Optional[str] = None):
             "as": "logs",
         }},
         {"$unwind": {"path": "$logs", "preserveNullAndEmptyArrays": True}},
+                {"$addFields": {"has_hours": {"$and": [
+            {"$in": ["$logs.status", ["PRESENT", "WFH", "ON_DUTY"]]},
+            {"$ne": [{"$ifNull": ["$logs.work_hours", None]}, None]},
+        ]}}},
         {"$group": {
             "_id": "$department",
             "emps": {"$addToSet": "$emp_code"},
@@ -417,15 +421,22 @@ def department_summary(month: str, department: Optional[str] = None):
             "total_late_minutes": {"$sum": "$logs.late_minutes"},
             "leave_count": {"$sum": {"$cond": [{"$eq": ["$logs.status", "LEAVE"]}, 1, 0]}},
             "on_duty_count": {"$sum": {"$cond": [{"$eq": ["$logs.status", "ON_DUTY"]}, 1, 0]}},
+            "hours_sum": {"$sum": {"$cond": ["$has_hours", "$logs.work_hours", 0]}},
+            "hours_count": {"$sum": {"$cond": ["$has_hours", 1, 0]}},
         }},
         {"$sort": {"_id": 1}},
     ]
     rows = list(db.employees.aggregate(pipeline))
     items = []
     for r in rows:
+        if r["hours_count"] == 0:
+            avg_hours = None
+        else:
+            avg_hours = float((Decimal(str(round(r["hours_sum"], 2))) / Decimal(r["hours_count"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
         items.append({
             "department": r["_id"],
             "headcount": len(r["emps"]),
+            "avg_work_hours": avg_hours,
             "present_days": r["present_days"],
             "late_count": r["late_count"],
             "total_late_minutes": r["total_late_minutes"],
@@ -433,13 +444,4 @@ def department_summary(month: str, department: Optional[str] = None):
             "on_duty_count": r["on_duty_count"],
         })
     return {"month": month, "items": items}
-    # --------------------------------------------------------------------------- #
-    # TODO - the rest of the contract (see openapi.yaml):
-    #   POST  /attendance/punch-out
-    #   PATCH /attendance/{emp_code}/{date}
-    #   GET   /analytics/employees/{emp_code}/monthly
-    #   GET   /analytics/departments/summary
-    #   GET   /analytics/leaderboard/late
-    #   GET   /analytics/departments/{department}/trend
-    #   GET   /admin/explain/{endpoint}
-    # --------------------------------------------------------------------------- #
+   
