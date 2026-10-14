@@ -11,6 +11,8 @@ openapi.yaml for the contract and DATA_MODEL.md for what is stored in MongoDB.
 import os
 import calendar
 import re
+import json
+from bson import json_util
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -35,6 +37,8 @@ db.employees.create_index("emp_code", unique=True)
 db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
 db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
 db.attendance_logs.create_index([("emp_code", 1), ("punch_in", -1)])
+db.employees.create_index("joined_on")
+db.employees.create_index([("department", 1), ("joined_on", 1)])
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -201,15 +205,7 @@ def punch_in(body: PunchInIn):
     doc.pop("_id", None)
     return to_api(doc)
 
-@app.get("/attendance")
-def list_attendance(
-    emp_code: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    status: Optional[str] = None,
-    page: int = 1,
-    page_size: int = 20,
-):
+def build_attendance_query(emp_code, date_from, date_to, status):
     q = {}
     if emp_code:
         q["emp_code"] = emp_code
@@ -221,11 +217,24 @@ def list_attendance(
             q["date"]["$lte"] = date_to
     if status:
         q["status"] = status
+    return q
+
+
+@app.get("/attendance")
+def list_attendance(
+    emp_code: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    status: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+):
+    q = build_attendance_query(emp_code, date_from, date_to, status)
     skip = (page - 1) * page_size
     total = db.attendance_logs.count_documents(q)
     cursor = db.attendance_logs.find(q, {"_id": 0}).sort([("date", -1), ("emp_code", 1)]).skip(skip).limit(page_size)
     items = [to_api(d) for d in cursor]
-    return {"items": items, "total": total, "page": page,"page_size": page_size}
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 @app.post("/attendance/punch-out")
 def punch_out(body: PunchOutIn):
@@ -445,3 +454,75 @@ def department_summary(month: str, department: Optional[str] = None):
         })
     return {"month": month, "items": items}
    
+@app.get("/admin/explain/{endpoint}")
+def explain_endpoint(
+    endpoint: str,
+    emp_code: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    status: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+):
+    if endpoint != "attendance_list":
+        raise HTTPException(422, "this endpoint is not supported yet")
+    q = build_attendance_query(emp_code, date_from, date_to, status)
+    command = {
+        "explain": {
+            "find": "attendance_logs",
+            "filter": q,
+            "sort": {"date": -1, "emp_code": 1},
+            "skip": (page - 1) * page_size,
+            "limit": page_size,
+        },
+        "verbosity": "executionStats",
+    }
+    result = db.command(command)
+    return {
+        "endpoint": endpoint,
+        "collection": "attendance_logs",
+        "explain": json.loads(json_util.dumps(result)),
+    }
+    
+@app.get("/analytics/leaderboard/late")
+def late_leaderboard(month: str, limit: int = 10, department: Optional[str] = None):
+    if not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+        raise HTTPException(422, "month must be YYYY-MM")
+    if limit < 1 or limit > 50:
+        raise HTTPException(422, "limit must be between 1 and 50")
+    year, mon = int(month[:4]), int(month[5:])
+    first = f"{month}-01"
+    last = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+    pipeline = [
+        {"$match": {"date": {"$gte": first, "$lte": last}}},
+        {"$group": {
+            "_id": "$emp_code",
+            "total_late_minutes": {"$sum": "$late_minutes"},
+            "late_count": {"$sum": {"$cond": [{"$gt": ["$late_minutes", 0]}, 1, 0]}},
+        }},
+        {"$match": {"total_late_minutes": {"$gt": 0}}},
+        {"$lookup": {"from": "employees", "localField": "_id", "foreignField": "emp_code", "as": "emp"}},
+        {"$unwind": "$emp"},
+    ]
+    if department:
+        pipeline.append({"$match": {"emp.department": department}})
+    pipeline.append({"$sort": {"total_late_minutes": -1, "_id": 1}})
+    rows = list(db.attendance_logs.aggregate(pipeline))
+    items = []
+    rank = 0
+    previous_total = None
+    for position, r in enumerate(rows, start=1):
+        if r["total_late_minutes"] != previous_total:
+            rank = position
+            previous_total = r["total_late_minutes"]
+        if rank > limit:
+            break
+        items.append({
+            "rank": rank,
+            "emp_code": r["_id"],
+            "name": r["emp"]["name"],
+            "department": r["emp"]["department"],
+            "total_late_minutes": r["total_late_minutes"],
+            "late_count": r["late_count"],
+        })
+    return {"month": month, "items": items}
