@@ -24,7 +24,7 @@ I tested these on a real MongoDB with the sample data.
 
 ## What I did not finish
 
-- Overnight shifts (like 22:00-06:00). Late, overtime and PATCH use one calendar date, so overtime for those shifts comes out wrong. I know about this bug and did not fix it.
+- Overnight shifts (like 22:00-06:00) work when the punch-in is on the shift's start date. A punch-in after midnight gets the next day as its record date, so that case is still wrong.
 - The department trend endpoint is not built.
 
 ## Notes

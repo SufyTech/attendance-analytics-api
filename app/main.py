@@ -43,9 +43,11 @@ db.employees.create_index([("department", 1), ("joined_on", 1)])
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-def compute_late_minutes(punch_in: datetime, shift_start: str) -> int:
+def compute_late_minutes(punch_in: datetime, shift_start: str, shift_end: str) -> int:
     h, m = map(int, shift_start.split(":"))
     start = punch_in.replace(hour=h, minute=m, second=0, microsecond=0)
+    if shift_end <= shift_start and punch_in < start and punch_in.strftime("%H:%M") < shift_end:
+        start -= timedelta(days=1)
     seconds = int((punch_in - start).total_seconds())
     return seconds // 60 if seconds > 600 else 0
 
@@ -95,9 +97,11 @@ def to_aware(dt):
         return None
     return dt.replace(tzinfo=timezone.utc).astimezone(IST)
 
-def compute_overtime(punch_out: datetime, shift_end: str, date_str: str) -> int:
+def compute_overtime(punch_out: datetime, shift_end: str, date_str: str, shift_start: str) -> int:
     h, m = map(int, shift_end.split(":"))
     end = datetime.fromisoformat(date_str).replace(hour=h, minute=m, tzinfo=IST)
+    if shift_end <= shift_start:
+        end += timedelta(days=1)
     minutes = int((punch_out - end).total_seconds() // 60)
     return minutes if minutes >= 30 else 0
 
@@ -221,7 +225,7 @@ def punch_in(body: PunchInIn):
         "punch_in": ts,
         "punch_out": None,
         "work_hours": None,
-        "late_minutes": compute_late_minutes(ts, emp["shift_start"]),
+        "late_minutes": compute_late_minutes(ts, emp["shift_start"], emp["shift_end"]),
         "overtime_minutes": 0,
         "half_day": False,
         "history": [],
@@ -300,7 +304,7 @@ def punch_out(body: PunchOutIn):
     if ts <= pin or ts - pin > timedelta(hours=24):
         raise HTTPException(422, "punched_at must be after punch_in and within 24 hours")
     work_hours = compute_work_hours(pin, ts)
-    overtime = compute_overtime(ts, emp["shift_end"], rec["date"])
+    overtime = compute_overtime(ts, emp["shift_end"], rec["date"], emp["shift_start"])
     res = db.attendance_logs.update_one(
         {"_id": rec["_id"], "punch_out": None},
         {"$set": {
@@ -345,10 +349,10 @@ def regularize(emp_code: str, date: str, body: RegularizeIn):
     new_overtime = 0
     new_half = False
     if new_in is not None:
-        new_late = compute_late_minutes(new_in, emp["shift_start"])
+        new_late = compute_late_minutes(new_in, emp["shift_start"], emp["shift_end"])
         if new_out is not None:
             new_hours = compute_work_hours(new_in, new_out)
-            new_overtime = compute_overtime(new_out, emp["shift_end"], date)
+            new_overtime = compute_overtime(new_out, emp["shift_end"], date, emp["shift_start"])
             new_half = new_hours < 4.5
     new_values = {
         "status": new_status,
