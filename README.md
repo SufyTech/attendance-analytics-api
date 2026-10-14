@@ -1,26 +1,37 @@
-# Candidate kit
+# Employee Attendance & Analytics API
 
-Read in this order:
+My submission for the attendance assignment. FastAPI + MongoDB, all code in `app/main.py`.
 
-1. `PROBLEM_STATEMENT.docx`: what you are asked to do, how it is evaluated.
-2. `openapi.yaml`: the API contract and the business rules (R1 - R10).
-3. `DATA_MODEL.md`: what is stored in MongoDB, with nine sample documents.
-4. `app/main.py`: the starter. Put **all** your code in this one file. It must start with `uvicorn app.main:app --port 8000`.
-5. `REVIEW.md`, `DECISIONS.md`: templates to fill in.
+## Run it
 
-`sample_data/` holds the nine sample documents as MongoDB Extended JSON; `sample_seed.py` loads them. The grader's dataset is
-much larger and contains cases they do not show.
+1. `python -m venv .venv`, then `.venv\Scripts\activate` (on Mac/Linux: `source .venv/bin/activate`)
+2. `pip install -r requirements.txt`
+3. Make a `.env` file with `MONGO_URI` and `MONGO_DB`
+4. `python sample_seed.py`
+5. `uvicorn app.main:app --port 8000`
+6. Open http://localhost:8000/docs
 
-## Local setup
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env            # set MONGO_URI / MONGO_DB (local docker: docker run -p 27017:27017 mongo:7)
-python sample_seed.py
-uvicorn app.main:app --port 8000 --reload
-```
-MongoDB **6.0 or newer** is required (the grader uses 7.0). MongoDB Atlas free tier (M0) works.
+## What works
 
-## Submit
-A public Git repository with `app/main.py`, `requirements.txt`, `REVIEW.md`, `DECISIONS.md` and a short `README.md`.
-No `.env`, no secrets, no Dockerfile.
+- Create and list employees (input checks, sorted, paged)
+- Punch-in, punch-out, and HR corrections with history
+- Attendance list with filters and paging
+- Monthly report per employee, department summary, late leaderboard
+- `/admin/explain` for 4 endpoints
+- `/health` pings the database
+
+I tested these on a real MongoDB with the sample data.
+
+## What I did not finish
+
+- Overnight shifts (like 22:00-06:00). Late, overtime and PATCH use one calendar date, so overtime for those shifts comes out wrong. I know about this bug and did not fix it.
+- The department trend endpoint is not built.
+
+## Notes
+
+- `REVIEW.md` has the bugs I found in the starter and how I fixed them.
+- `DECISIONS.md` has my answers on indexes, races, ties, headcount and scale.
+
+## AI use
+
+I used AI for reference and for review. I typed the changes myself, and I can explain every part of the code.
