@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -111,6 +111,14 @@ def count_weekdays(start: str, end: str) -> int:
         d += timedelta(days=1)
     return count
 
+def check_date(value: str, name: str):
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        raise HTTPException(422, f"{name} must be YYYY-MM-DD")
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(422, f"{name} must be a real calendar date")
+    
 # --------------------------------------------------------------------------- #
 # Models
 # --------------------------------------------------------------------------- #
@@ -146,28 +154,49 @@ class RegularizeIn(BaseModel):
 # --------------------------------------------------------------------------- #
 @app.get("/health")
 def health():
+    try:
+        client.admin.command("ping")
+    except Exception:
+        raise HTTPException(503, "database unavailable")
     return {"status": "ok"}
-
 
 @app.post("/employees", status_code=201)
 def create_employee(body: EmployeeIn):
-    if db.employees.find_one({"emp_code": body.emp_code}):
-        raise HTTPException(409, "emp_code already exists")
+    if not re.match(r"^EMP\d{4,6}$", body.emp_code):
+        raise HTTPException(422, "emp_code must be EMP followed by 4-6 digits")
+    if not (1 <= len(body.name) <= 100):
+        raise HTTPException(422, "name must be 1-100 characters")
+    if len(body.email) > 120 or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", body.email):
+        raise HTTPException(422, "invalid email")
+    if not (1 <= len(body.department) <= 50):
+        raise HTTPException(422, "department must be 1-50 characters")
+    for t in (body.shift_start, body.shift_end):
+        if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", t):
+            raise HTTPException(422, "shift times must be HH:MM (24-hour)")
+    if body.shift_start == body.shift_end:
+        raise HTTPException(422, "shift_start must differ from shift_end")
+    check_date(body.joined_on, "joined_on")
     doc = body.model_dump()
-    doc["created_at"] = datetime.now()
-    db.employees.insert_one(doc)
+    now = datetime.now(IST).replace(microsecond=0)
+    doc["created_at"] = now
+    try:
+        db.employees.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(409, "emp_code already exists")
     doc.pop("_id", None)
+    doc["created_at"] = to_ms(now)
     return doc
 
-
 @app.get("/employees")
-def list_employees(department: Optional[str] = None, page: int = 1, page_size: int = 20):
+def list_employees(department: Optional[str] = None, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100)):
     q = {}
     if department:
         q["department"] = department
     skip = (page - 1) * page_size
     total = db.employees.count_documents(q)
-    items = list(db.employees.find(q, {"_id": 0}).skip(skip).limit(page_size))
+    items = list(db.employees.find(q, {"_id": 0}).sort("emp_code", 1).skip(skip).limit(page_size))
+    for e in items:
+        e["created_at"] = to_ms(e.get("created_at"))
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
@@ -231,6 +260,18 @@ def list_attendance(
     page: int = 1,
     page_size: int = 20,
 ):
+    if page < 1:
+            raise HTTPException(422, "page must be 1 or more")
+    if page_size < 1 or page_size > 100:
+        raise HTTPException(422, "page_size must be between 1 and 100")
+    if date_from:
+        check_date(date_from, "date_from")
+    if date_to:
+        check_date(date_to, "date_to")
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "date_from must not be after date_to")
+    if status and status not in ALL_STATUSES:
+        raise HTTPException(422, "invalid status")
     q = build_attendance_query(emp_code, date_from, date_to, status)
     skip = (page - 1) * page_size
     total = db.attendance_logs.count_documents(q)
